@@ -74,7 +74,7 @@ deploy_job:
         "IMAGE_TAG='$IMAGE_TAG' CI_REGISTRY='$CI_REGISTRY' CI_REGISTRY_USER='$CI_REGISTRY_USER' CI_REGISTRY_PASSWORD='$CI_REGISTRY_PASSWORD' sh -s" <<'REMOTE'
       set -eu
 
-      old_image=$(docker inspect node-todo-app --format '{{.Config.Image}}')
+      old_image=$(docker inspect node-todo-app --format '{{.Config.Image}}' 2>/dev/null || true)
       echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
       docker pull "$IMAGE_TAG"
 
@@ -90,7 +90,7 @@ deploy_job:
         exit 1
       fi
 
-      docker rm -f node-todo-app
+      docker rm -f node-todo-app 2>/dev/null || true
       if docker run -d --name node-todo-app --restart unless-stopped \
         --user node \
         -p 127.0.0.1:8002:8000 "$IMAGE_TAG"; then
@@ -103,6 +103,14 @@ deploy_job:
       fi
 
       echo "New deployment failed; restoring previous image"
+
+      if [ -z "$old_image" ]; then
+       echo "First deployment failed; cleaning up failed containers"
+       docker rm -f node-todo-app 2>/dev/null || true
+       docker rm -f node-todo-candidate 2>/dev/null || true
+       exit 1
+      fi
+
       docker rm -f node-todo-app 2>/dev/null || true
 
       if docker run -d --name node-todo-app --restart unless-stopped \
