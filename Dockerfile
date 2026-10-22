@@ -1,7 +1,18 @@
-FROM node:12.2.0-alpine
-WORKDIR app
-COPY . .
-RUN npm install
-RUN npm run test
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm ci --omit=dev
+
+COPY app.js ./
+COPY views ./views
+
+ENV PORT=8000
+
 EXPOSE 8000
-CMD ["node","app.js"]
+
+USER node
+
+CMD ["node", "app.js"]
