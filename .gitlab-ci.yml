@@ -74,7 +74,23 @@ deploy_job:
         "IMAGE_TAG='$IMAGE_TAG' CI_REGISTRY='$CI_REGISTRY' CI_REGISTRY_USER='$CI_REGISTRY_USER' CI_REGISTRY_PASSWORD='$CI_REGISTRY_PASSWORD' sh -s" <<'REMOTE'
       set -eu
 
+      wait_for_http() {
+        url="$1"
+        attempt=1
+        while [ "$attempt" -le 15 ]; do
+          if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+            echo "Healthy: $url"
+            return 0
+          fi
+          echo "Waiting for app ($attempt/15)"
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+        return 1
+      }
+
       old_image=$(docker inspect node-todo-app --format '{{.Config.Image}}' 2>/dev/null || true)
+
       echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
       docker pull "$IMAGE_TAG"
 
@@ -83,51 +99,42 @@ deploy_job:
         --user node \
         -p 127.0.0.1:8003:8000 "$IMAGE_TAG"
 
-      if ! docker exec node-todo-candidate node -e \
-       "require('http').get('http://127.0.0.1:8000/todo',r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"; then
-       docker rm -f node-todo-candidate || true
-       echo "Candidate failed; existing app remains running"
-       exit 1
-      fi
-
-      docker rm -f node-todo-app 2>/dev/null || true
-      if docker run -d --name node-todo-app --restart unless-stopped \
-        --user node \
-        -p 127.0.0.1:8002:8000 "$IMAGE_TAG"; then
-        if curl --retry 5 --retry-delay 2 --retry-connrefused -fsS \
-          http://127.0.0.1:8002/todo >/dev/null; then
-          docker rm -f node-todo-candidate
-          echo "Deployment successful"
-          exit 0
-        fi
-      fi
-
-      echo "New deployment failed; restoring previous image"
-
-      if [ -z "$old_image" ]; then
-       echo "First deployment failed; cleaning up failed containers"
-       docker rm -f node-todo-app 2>/dev/null || true
-       docker rm -f node-todo-candidate 2>/dev/null || true
-       exit 1
-      fi
-
-      docker rm -f node-todo-app 2>/dev/null || true
-
-      if docker run -d --name node-todo-app --restart unless-stopped \
-        --user node \
-        -p 127.0.0.1:8002:8000 "$old_image"; then
-        if curl --retry 5 --retry-delay 2 --retry-connrefused -fsS \
-          http://127.0.0.1:8002/todo >/dev/null; then
-          echo "Rollback successful; previous app is healthy"
-        else
-          echo "CRITICAL: rollback health check failed"
-          exit 1
-        fi
-      else
-        echo "CRITICAL: could not restore previous app"
+      if ! wait_for_http http://127.0.0.1:8003/todo; then
+        docker logs node-todo-candidate || true
+        docker rm -f node-todo-candidate || true
+        echo "Candidate failed; production was not changed"
         exit 1
       fi
 
+      if [ -z "$old_image" ]; then
+        echo "No existing production image found; refusing to replace production"
+        exit 1
+      fi
+
+      docker rm -f node-todo-app 2>/dev/null || true
+
+      if docker run -d --name node-todo-app --restart unless-stopped \
+        --user node \
+        -p 127.0.0.1:8002:8000 "$IMAGE_TAG" &&
+        wait_for_http http://127.0.0.1:8002/todo; then
+        docker rm -f node-todo-candidate 2>/dev/null || true
+        echo "Deployment successful"
+        exit 0
+      fi
+
+      echo "Deployment failed; restoring previous image"
+      docker rm -f node-todo-app 2>/dev/null || true
+
+      if docker run -d --name node-todo-app --restart unless-stopped \
+        --user node \
+        -p 127.0.0.1:8002:8000 "$old_image" &&
+        wait_for_http http://127.0.0.1:8002/todo; then
+        docker rm -f node-todo-candidate 2>/dev/null || true
+        echo "Rollback successful"
+        exit 1
+      fi
+
+      echo "CRITICAL: rollback health check failed"
       docker rm -f node-todo-candidate 2>/dev/null || true
       exit 1
       REMOTE
