@@ -83,11 +83,11 @@ deploy_job:
         --user node \
         -p 127.0.0.1:8003:8000 "$IMAGE_TAG"
 
-      if ! curl --retry 10 --retry-delay 3 --retry-connrefused --max-time 5 -fsS \
-        http://127.0.0.1:8003/todo >/dev/null; then
-        docker rm -f node-todo-candidate || true
-        echo "Candidate failed; existing app remains running"
-        exit 1
+      if ! docker exec node-todo-candidate node -e \
+       "require('http').get('http://127.0.0.1:8000/todo',r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"; then
+       docker rm -f node-todo-candidate || true
+       echo "Candidate failed; existing app remains running"
+       exit 1
       fi
 
       docker rm -f node-todo-app 2>/dev/null || true
